@@ -1,0 +1,6 @@
+# Never track a compiled binary or a fuzz corpus produced by a local run.
+/fuzzrun
+/fuzzrun.exe
+*.test
+*.out
+/testdata/planted/testdata/
