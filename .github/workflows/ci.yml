@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # A workflow that fails to parse reports nothing at all, so actionlint is the
+  # first lane.
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+  test:
+    name: build + vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go version
+      - name: gofmt
+        run: |
+          drift=$(gofmt -l .)
+          if [ -n "$drift" ]; then echo "::error::not gofmt-clean:"; echo "$drift"; exit 1; fi
+      - name: build
+        run: CGO_ENABLED=0 go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race -timeout 10m ./...
+
+      # The load average is read per platform behind build tags; vet and build
+      # cross-compile in seconds and catch a tag that left a platform unbuilt.
+      - name: cross-builds
+        run: |
+          set -eu
+          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64 windows/amd64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go vet ./...
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null .
+          done
+
+      # No `set -o pipefail`: govulncheck exits non-zero over findings it has
+      # decided this module does not call, and vulngate judges the report.
+      - name: govulncheck, judged by vulngate
+        run: |
+          set -eu
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.20.1
+          "$(go env GOPATH)/bin/govulncheck" -format json ./... > /tmp/vuln.json || true
+          test -s /tmp/vuln.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
+          "$(go env GOPATH)/bin/vulngate" -go "$(go env GOVERSION)" /tmp/vuln.json
+
+  # The planted positive, run through the built binary: a crasher finder that
+  # has never been seen finding a crasher may not find one.
+  planted:
+    name: fuzzrun finds the planted crasher
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build -o /tmp/fuzzrun .
+      - name: exit status 1 and a corpus path
+        run: |
+          set -u
+          cp -r testdata/planted /tmp/planted
+          if /tmp/fuzzrun run --dir /tmp/planted --time 5s --jobs 2 --logs /tmp/logs > /tmp/out.txt; then
+            echo "::error::fuzzrun reported a module with a planted failing target as clean"
+            cat /tmp/out.txt
+            exit 1
+          fi
+          cat /tmp/out.txt
+          /tmp/fuzzrun wait /tmp/out.txt "CRASH ./. FuzzBad" --timeout 1s
