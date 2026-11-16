@@ -50,7 +50,7 @@ func TestAuditFloatsOld(t *testing.T) {
 		t.Fatalf("summary wrong:\n%s", out)
 	}
 	for _, n := range []string{"FuzzMaxAbsMul", "FuzzCDotC", "FuzzCMulTwiddle", "FuzzConjReverse", "FuzzElem",
-		"FuzzMDCTFold", "FuzzMulAddRows", "FuzzSquaredMagnitude", "FuzzAxpy:","FuzzAxpyRowsNoFMA"} {
+		"FuzzMDCTFold", "FuzzMulAddRows", "FuzzSquaredMagnitude", "FuzzAxpy:", "FuzzAxpyRowsNoFMA"} {
 		if !strings.Contains(out, "GAP ./. "+n) {
 			t.Errorf("missing GAP %s\n%s", n, out)
 		}
