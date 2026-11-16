@@ -61,6 +61,31 @@ Blocks until FILE contains SUBSTRING, for example a log written by a background
 `fuzzrun run`. Prints `found` (exit `0`) or `timeout` (exit `1`); exit `2` on a
 read error other than the file not existing yet.
 
+## `fuzzrun audit`
+
+```sh
+fuzzrun audit --dir <repo>
+```
+
+Finds the fuzz targets no workflow fuzzes. It parses the test files for the
+`FuzzXxx` targets (as `run` does), reads `.github/workflows/*.yml` and prints a
+`GAP` line per target that no step fuzzes, and a `BLANKET` line per fuzz step
+under `continue-on-error: true` (a step that cannot fail cannot say that nothing
+was fuzzed). A step running `fuzzrun run` covers every target (or those of its
+`--package`). Otherwise only a `go test -fuzz` that go test would really run
+counts: the pattern is an unanchored regexp, a pattern matching more than one
+target of the package fuzzes none, and `-fuzz` with several packages (`./...` over
+a multi-package module) is refused by the go tool. Those steps are reported as
+`NOTE`s and their targets stay gaps.
+
+Exit status: `0` everything covered (a repository with no targets is `0` with a
+note), `1` gaps or a blanket `continue-on-error`, `2` nothing could be read (no
+`go.mod`, no workflows, a parse error).
+
+`fuzzrun census --root <dir> [--report file]` runs the audit over every
+`<dir>/<org>/<repo>` clone (the layout of `gorequires --clone-dir`) and writes a
+report with the counts.
+
 ## Why
 
 The fuzz targets of a module are a security control only if they are actually

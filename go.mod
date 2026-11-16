@@ -23,6 +23,7 @@ go 1.27.4
 require (
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.49.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

@@ -3,6 +3,8 @@
 //
 // Exit status of "run": 0 every target passed, 1 at least one failure or
 // crasher, 2 the run could not be made. Of "wait": 0 found, 1 timeout, 2 error.
+// Of "audit": 0 every target is fuzzed by a workflow, 1 gaps or a blanket
+// continue-on-error, 2 nothing could be read.
 package main
 
 import (
