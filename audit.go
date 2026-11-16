@@ -41,6 +41,11 @@ type auditReport struct {
 	gaps    []gap
 	blanket []string // "file: job/step" fuzz steps under continue-on-error: true
 	notes   []string
+	// uncertain lists fuzz steps the audit cannot read (a -fuzz pattern computed
+	// at run time, a make target, a script, a working-directory). When there are
+	// any, the uncovered targets are unsure, not gaps: the step might fuzz them.
+	uncertain []string
+	unsure    []gap
 }
 
 type wfFile struct {
@@ -48,14 +53,76 @@ type wfFile struct {
 }
 
 type wfJob struct {
-	COE   any      `yaml:"continue-on-error"`
-	Steps []wfStep `yaml:"steps"`
+	COE      any      `yaml:"continue-on-error"`
+	Steps    []wfStep `yaml:"steps"`
+	Strategy struct {
+		Matrix map[string]any `yaml:"matrix"`
+	} `yaml:"strategy"`
 }
 
 type wfStep struct {
 	Name string `yaml:"name"`
 	Run  string `yaml:"run"`
 	COE  any    `yaml:"continue-on-error"`
+	WD   string `yaml:"working-directory"`
+}
+
+var (
+	matrixRef = regexp.MustCompile(`\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}`)
+	// indirect: a fuzz run started through make, a script or a loop variable,
+	// which the audit cannot read.
+	indirectFuzz = regexp.MustCompile(`\b(make|just|task|npm run)\s+\S*fuzz|\.sh\b[^\n]*fuzz|scripts?/\S*fuzz|\bcd\s+\S+`)
+)
+
+func scalarStr(v any) (string, bool) {
+	switch x := v.(type) {
+	case string, int, float64, bool:
+		return fmt.Sprint(x), true
+	}
+	return "", false
+}
+
+// matrixValues lists the values a matrix key takes: its own list and the
+// "include" entries that set it.
+func matrixValues(m map[string]any, key string) []string {
+	var out []string
+	if l, ok := m[key].([]any); ok {
+		for _, e := range l {
+			if s, ok := scalarStr(e); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	if inc, ok := m["include"].([]any); ok {
+		for _, e := range inc {
+			if em, ok := e.(map[string]any); ok {
+				if s, ok := scalarStr(em[key]); ok {
+					out = append(out, s)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// expandMatrix replaces each ${{ matrix.KEY }} in s by every value of the job's
+// matrix; ok is false when a key has no known value.
+func expandMatrix(s string, m map[string]any) (out []string, ok bool) {
+	out = []string{s}
+	for _, ref := range matrixRef.FindAllStringSubmatch(s, -1) {
+		vals := matrixValues(m, ref[1])
+		if len(vals) == 0 {
+			return nil, false
+		}
+		var next []string
+		for _, o := range out {
+			for _, v := range vals {
+				next = append(next, strings.ReplaceAll(o, ref[0], v))
+			}
+		}
+		out = next
+	}
+	return out, true
 }
 
 // isTrue reports a continue-on-error value that is the literal true.
@@ -261,8 +328,35 @@ func resolvePkgs(args, all []string) []string {
 
 // audit reads the module at dir and its workflows. An error means nothing could
 // be read (exit 2).
-func audit(dir string) (*auditReport, error) {
-	if !isModule(dir) {
+func audit(dir string) (*auditReport, error) { return auditAt(dir, true) }
+
+// hasNestedModule reports whether a go.mod exists below dir (testdata, vendor,
+// dot and underscore directories skipped, as the go command skips them).
+func hasNestedModule(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			n := d.Name()
+			if p != dir && (n == "testdata" || n == "vendor" || strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == "go.mod" {
+			found = true
+		}
+		return nil
+	})
+	return found
+}
+
+// auditAt is audit; with requireRoot false a repository whose go.mod files are
+// all nested is audited as one tree (packages are then relative to the repo).
+func auditAt(dir string, requireRoot bool) (*auditReport, error) {
+	if requireRoot && !isModule(dir) {
 		return nil, fmt.Errorf("no go.mod in %s", dir)
 	}
 	ts, err := discover(dir, nil)
@@ -310,12 +404,17 @@ func audit(dir string) (*auditReport, error) {
 			job := wf.Jobs[jn]
 			for i, st := range job.Steps {
 				invs, fuzzr, fpk := scanRun(st.Run)
-				if !fuzzr && len(invs) == 0 {
-					continue
-				}
 				label := st.Name
 				if label == "" {
 					label = fmt.Sprintf("step %d", i+1)
+				}
+				indirect := !fuzzr && strings.Contains(strings.ToLower(st.Run), "fuzz") &&
+					(indirectFuzz.MatchString(st.Run) || (st.WD != "" && len(invs) > 0))
+				if indirect {
+					rep.uncertain = append(rep.uncertain, fmt.Sprintf("%s: job %s, %q: fuzz run through make, a script or another directory", base, jn, label))
+				}
+				if !fuzzr && len(invs) == 0 {
+					continue
 				}
 				if isTrue(st.COE) || isTrue(job.COE) {
 					rep.blanket = append(rep.blanket, fmt.Sprintf("%s: job %s, %q: continue-on-error: true", base, jn, label))
@@ -328,7 +427,15 @@ func audit(dir string) (*auditReport, error) {
 					}
 				}
 				for _, inv := range invs {
-					auditInvocation(rep, ts, all, inv, base, jn, label, covered, why)
+					pats, ok := expandMatrix(inv.pattern, job.Strategy.Matrix)
+					if !ok {
+						pats = []string{inv.pattern} // left computed below
+					}
+					for _, p := range pats {
+						one := inv
+						one.pattern = p
+						auditInvocation(rep, ts, all, one, base, jn, label, covered, why)
+					}
 				}
 			}
 		}
@@ -339,7 +446,11 @@ func audit(dir string) (*auditReport, error) {
 			if r == "" {
 				r = "no workflow fuzzes it"
 			}
-			rep.gaps = append(rep.gaps, gap{t, r})
+			if len(rep.uncertain) > 0 {
+				rep.unsure = append(rep.unsure, gap{t, r})
+			} else {
+				rep.gaps = append(rep.gaps, gap{t, r})
+			}
 		}
 	}
 	return rep, nil
@@ -347,8 +458,12 @@ func audit(dir string) (*auditReport, error) {
 
 func auditInvocation(rep *auditReport, ts []target, all []string, inv invocation, file, job, label string, covered map[target]bool, why map[target]string) {
 	where := fmt.Sprintf("%s: job %s, %q", file, job, label)
-	if shellVar.MatchString(inv.pattern) {
-		rep.notes = append(rep.notes, fmt.Sprintf("%s: -fuzz %q is computed at run time: counted as covering nothing", where, inv.pattern))
+	computed := shellVar.MatchString(inv.pattern) || strings.Contains(inv.pattern, "${{")
+	for _, p := range inv.pkgs {
+		computed = computed || strings.Contains(p, "$")
+	}
+	if computed {
+		rep.uncertain = append(rep.uncertain, fmt.Sprintf("%s: -fuzz %q over %v is computed at run time", where, inv.pattern, inv.pkgs))
 		return
 	}
 	pat, _, _ := strings.Cut(inv.pattern, "/")
@@ -405,8 +520,14 @@ func (r *auditReport) write(out io.Writer) {
 	for _, b := range r.blanket {
 		fmt.Fprintln(out, "BLANKET", b)
 	}
-	fmt.Fprintf(out, "audit: %d targets, %d without a workflow, %d blanket continue-on-error\n",
-		len(r.targets), len(r.gaps), len(r.blanket))
+	for _, u := range r.uncertain {
+		fmt.Fprintln(out, "UNCERTAIN step", u)
+	}
+	for _, g := range r.unsure {
+		fmt.Fprintf(out, "UNCERTAIN %s %s: %s, and a step the audit cannot read may fuzz it\n", g.t.pkg, g.t.name, g.reason)
+	}
+	fmt.Fprintf(out, "audit: %d targets, %d without a workflow, %d blanket continue-on-error, %d uncertain\n",
+		len(r.targets), len(r.gaps), len(r.blanket), len(r.unsure))
 }
 
 func auditCmd() *cobra.Command {
@@ -459,13 +580,19 @@ func censusCmd() *cobra.Command {
 				return &exitError{2, errNoRepos}
 			}
 			var sb strings.Builder
-			var read, withTargets, withGaps, withBlanket, noWorkflow, unread int
+			var read, withTargets, withGaps, withBlanket, noWorkflow, unread, uncertain, nested int
 			for _, d := range dirs {
 				if st, err := os.Stat(d); err != nil || !st.IsDir() {
 					continue
 				}
 				name, _ := filepath.Rel(root, d)
 				rep, err := audit(d)
+				if err != nil && !isModule(d) && hasNestedModule(d) {
+					rep, err = auditAt(d, false)
+					if err == nil {
+						nested++
+					}
+				}
 				if err != nil {
 					unread++
 					if strings.HasPrefix(err.Error(), "no workflows") {
@@ -481,6 +608,10 @@ func censusCmd() *cobra.Command {
 					continue
 				}
 				withTargets++
+				if len(rep.unsure) > 0 {
+					uncertain++
+					fmt.Fprintf(&sb, "UNCERTAIN %s %d/%d\n", name, len(rep.unsure), len(rep.targets))
+				}
 				if len(rep.gaps) > 0 {
 					withGaps++
 					fmt.Fprintf(&sb, "GAPS %s %d/%d\n", name, len(rep.gaps), len(rep.targets))
@@ -496,8 +627,8 @@ func censusCmd() *cobra.Command {
 					}
 				}
 			}
-			sum := fmt.Sprintf("census: %d directories; %d audited, %d unaudited (%d of them have fuzz targets but no workflow); %d audited have fuzz targets, %d with gaps, %d with a blanket continue-on-error step\n",
-				len(dirs), read, unread, noWorkflow, withTargets, withGaps, withBlanket)
+			sum := fmt.Sprintf("census: %d directories; %d audited, %d unaudited (%d of them have fuzz targets but no workflow); %d audited have fuzz targets, %d with gaps, %d uncertain, %d with a blanket continue-on-error step (%d audited have only nested modules)\n",
+				len(dirs), read, unread, noWorkflow, withTargets, withGaps, uncertain, withBlanket, nested)
 			fmt.Fprint(cmd.OutOrStdout(), sum)
 			if report != "" {
 				if err := os.WriteFile(report, []byte(sum+sb.String()), 0o644); err != nil {

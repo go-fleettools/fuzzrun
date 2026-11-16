@@ -1,0 +1,33 @@
+name: fuzz
+
+# Time-boxed fuzzing of the three targets. A crasher found here is committed
+# under testdata/fuzz/ AND written out as a named unit test (the emulated CI
+# lanes run away from testdata/).
+
+on:
+  schedule:
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzXZ, FuzzLZMA, FuzzLZMA2]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - run: GOMEMLIMIT=2GiB go test . -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 120s
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: crashers-${{ matrix.target }}
+          path: testdata/fuzz
