@@ -175,6 +175,36 @@ func TestAuditMatrixXZ(t *testing.T) {
 	}
 }
 
+// go-simd/bitset's real fuzz.yml runs every step over ./... ; bench/interleave
+// is a nested module, so that is ONE package and go test accepts it. The first
+// version of the audit counted two packages and called every step refused.
+func TestAuditNestedModuleIsNotAPackage(t *testing.T) {
+	out, _, code := execute(t, "audit", "--dir", "testdata/audit/bitset")
+	if code != 1 || strings.Contains(out, "refused") || strings.Contains(out, "multiple packages") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "audit: 7 targets, 1 without a workflow, 6 blanket") || !strings.Contains(out, "GAP ./. FuzzBools") || strings.Contains(out, "FuzzNested") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+}
+
+// fuzzrun run does not enter nested modules either: go test run from the root
+// could not build them.
+func TestDiscoverSkipsNestedModules(t *testing.T) {
+	got, err := discover("testdata/audit/bitset", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range got {
+		if g.name == "FuzzNested" {
+			t.Fatalf("nested module target discovered: %v", got)
+		}
+	}
+	if len(got) != 7 {
+		t.Fatalf("got %d targets, want 7: %v", len(got), got)
+	}
+}
+
 func TestAuditUncertain(t *testing.T) {
 	mk := func(run string) (string, int) {
 		d := t.TempDir()
