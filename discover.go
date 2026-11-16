@@ -73,6 +73,9 @@ func discover(dir string, patterns []string) ([]target, error) {
 			if d.Name() == ".git" || d.Name() == "testdata" {
 				return filepath.SkipDir
 			}
+			if nestedModule(dir, p) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(p, "_test.go") {
@@ -129,6 +132,13 @@ func matchPkg(pkg string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// nestedModule reports whether p is a subdirectory of dir with a go.mod of its
+// own, inside a dir that is itself a module: the go command does not see it as
+// part of dir's module ("./..." stops there), so neither do we.
+func nestedModule(dir, p string) bool {
+	return p != dir && isModule(p) && isModule(dir)
 }
 
 // isModule reports whether dir holds a go.mod.

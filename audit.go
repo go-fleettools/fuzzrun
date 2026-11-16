@@ -264,6 +264,9 @@ func modulePackages(dir string) ([]string, error) {
 			if p != dir && (n == "testdata" || n == "vendor" || strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_")) {
 				return filepath.SkipDir
 			}
+			if nestedModule(dir, p) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.HasSuffix(p, ".go") {
