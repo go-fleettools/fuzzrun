@@ -78,7 +78,13 @@ target of the package fuzzes none, and `-fuzz` with several packages (`./...` ov
 a multi-package module) is refused by the go tool. Those steps are reported as
 `NOTE`s and their targets stay gaps.
 
-Exit status: `0` everything covered (a repository with no targets is `0` with a
+`${{ matrix.KEY }}` in a `-fuzz` pattern is expanded from the job's
+`strategy.matrix` (list values and `include` entries). A step the audit cannot
+read (a pattern computed by the shell, `make fuzz`, a script, a
+`working-directory`) makes the uncovered targets `UNCERTAIN` instead of `GAP`;
+they do not fail the audit.
+
+Exit status: `0` everything covered or uncertain (a repository with no targets is `0` with a
 note), `1` gaps or a blanket `continue-on-error`, `2` nothing could be read (no
 `go.mod`, no workflows, a parse error).
 

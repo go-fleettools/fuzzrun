@@ -154,6 +154,52 @@ func TestAuditRegexpAndShape(t *testing.T) {
 	}
 }
 
+// go-compressions/xz's real fuzz.yml names its targets through a matrix.
+func TestAuditMatrixXZ(t *testing.T) {
+	out, _, code := execute(t, "audit", "--dir", "testdata/audit/xz")
+	if code != 0 || !strings.Contains(out, "audit: 3 targets, 0 without a workflow, 0 blanket continue-on-error, 0 uncertain") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	// mutation: drop one value from the matrix and exactly that target is a gap.
+	d := cloneSubject(t, "testdata/audit/xz")
+	p := filepath.Join(d, ".github/workflows/fuzz.yml")
+	b, _ := os.ReadFile(p)
+	m := strings.Replace(string(b), "[FuzzXZ, FuzzLZMA, FuzzLZMA2]", "[FuzzXZ, FuzzLZMA]", 1)
+	if m == string(b) {
+		t.Fatal("mutation did not apply")
+	}
+	write(t, p, m)
+	out, _, code = execute(t, "audit", "--dir", d)
+	if code != 1 || !strings.Contains(out, "GAP ./. FuzzLZMA2") || strings.Contains(out, "GAP ./. FuzzXZ") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+}
+
+func TestAuditUncertain(t *testing.T) {
+	mk := func(run string) (string, int) {
+		d := t.TempDir()
+		write(t, filepath.Join(d, "go.mod"), "module m\n")
+		write(t, filepath.Join(d, "a_test.go"), "package m\nimport \"testing\"\nfunc FuzzA(f *testing.F) {}\nfunc FuzzB(f *testing.F) {}\n")
+		write(t, filepath.Join(d, ".github/workflows/f.yml"), "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: |\n"+run)
+		out, _, code := execute(t, "audit", "--dir", d)
+		return out, code
+	}
+	for name, run := range map[string]string{
+		"loop variable":  "          for f in FuzzA FuzzB; do go test -fuzz \"$f\" .; done\n",
+		"make":           "          make fuzz\n",
+		"unknown matrix": "          go test -fuzz '${{ matrix.zz }}' .\n",
+	} {
+		out, code := mk(run)
+		if code != 0 || strings.Contains(out, "GAP ") || !strings.Contains(out, "UNCERTAIN ./. FuzzA") || !strings.Contains(out, "0 without a workflow") || !strings.Contains(out, "2 uncertain") {
+			t.Errorf("%s: exit %d\n%s", name, code, out)
+		}
+	}
+	// a readable step that covers one target leaves the other a GAP when nothing is uncertain.
+	if out, code := mk("          go test -fuzz '^FuzzA$' .\n"); code != 1 || !strings.Contains(out, "GAP ./. FuzzB") {
+		t.Errorf("exit %d\n%s", code, out)
+	}
+}
+
 func TestAuditMultiplePackagesRefused(t *testing.T) {
 	d := t.TempDir()
 	write(t, filepath.Join(d, "go.mod"), "module m\n")
@@ -215,13 +261,22 @@ func TestCensus(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	want := "census: 4 directories; 3 audited, 1 unaudited (1 of them have fuzz targets but no workflow); 2 audited have fuzz targets, 1 with gaps, 1 with a blanket continue-on-error step"
+	want := "census: 4 directories; 3 audited, 1 unaudited (1 of them have fuzz targets but no workflow); 2 audited have fuzz targets, 1 with gaps, 0 uncertain, 1 with a blanket continue-on-error step (0 audited have only nested modules)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("got %q", out)
 	}
 	b, _ := os.ReadFile(report)
 	if !strings.Contains(string(b), "GAPS o/old 10/18") || !strings.Contains(string(b), "NOWORKFLOW o/nowf") {
 		t.Fatalf("report:\n%s", b)
+	}
+	// a repository whose only go.mod is nested is audited as one tree.
+	nr := t.TempDir()
+	write(t, filepath.Join(nr, "o/nest/sub/go.mod"), "module n\n")
+	write(t, filepath.Join(nr, "o/nest/sub/a_test.go"), "package n\nimport \"testing\"\nfunc FuzzA(f *testing.F) {}\n")
+	write(t, filepath.Join(nr, "o/nest/.github/workflows/f.yml"), "on: push\njobs: {}\n")
+	out, _, _ = execute(t, "census", "--root", nr)
+	if !strings.Contains(out, "1 with gaps") || !strings.Contains(out, "(1 audited have only nested modules)") {
+		t.Fatalf("nested: %q", out)
 	}
 	if _, _, code := execute(t, "census", "--root", t.TempDir()); code != 2 {
 		t.Fatalf("empty root: exit %d", code)
