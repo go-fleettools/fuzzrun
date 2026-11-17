@@ -92,6 +92,19 @@ note), `1` gaps or a blanket `continue-on-error`, `2` nothing could be read (no
 `<dir>/<org>/<repo>` clone (the layout of `gorequires --clone-dir`) and writes a
 report with the counts.
 
+## `fuzzrun workflow`
+
+```sh
+fuzzrun workflow --dir <repo> [--write]
+```
+
+Rewrites `.github/workflows/fuzz.yml` into the form of go-simd/floats#66: every
+job fuzzing with one `go test -fuzz` step per target gets one `fuzzrun run` step
+(exit 2 red, exit 1 tolerated) and a per-target logs artifact. Jobs are found by
+parsing the YAML under the top-level `jobs:` key; `gotip test` steps are left
+alone. With no `fuzz.yml`, a nightly one is created. Without `--write` it only
+says what would change. Exit `0` changed, `1` nothing to change, `2` could not.
+
 ## Why
 
 The fuzz targets of a module are a security control only if they are actually
