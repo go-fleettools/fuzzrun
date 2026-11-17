@@ -13,7 +13,7 @@ import (
 )
 
 // fuzzrunVersion is the release the generated workflows run.
-const fuzzrunVersion = "v0.4.0"
+const fuzzrunVersion = "v0.5.0"
 
 // The fuzz step is the one of go-simd/floats#66: exit 2 (the run could not be
 // made) is red, exit 1 (a crasher, or the benign -fuzztime deadline flake) is

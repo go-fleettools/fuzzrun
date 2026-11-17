@@ -105,6 +105,23 @@ parsing the YAML under the top-level `jobs:` key; `gotip test` steps are left
 alone. With no `fuzz.yml`, a nightly one is created. Without `--write` it only
 says what would change. Exit `0` changed, `1` nothing to change, `2` could not.
 
+## `fuzzrun adopt`
+
+```sh
+fuzzrun adopt open   --dir <clone>
+fuzzrun adopt finish --dir <clone>
+```
+
+`open` branches `fuzzrun-workflow` from `origin/HEAD`, runs the `workflow`
+rewrite, commits it, adds a temporary `push` trigger in a second commit, pushes
+with `gitpush` and opens the pull request with `gh pr create`; it prints the URL.
+Once the run on the branch has finished, `finish` reads the latest push run of
+`fuzz.yml` for the SHA of the branch head (`git rev-parse`) and refuses (exit
+`2`) unless every job concluded success and every job log carries
+`N targets: N PASS, 0 FAIL, 0 CRASH`. A crasher is printed and exits `1`.
+Otherwise the trigger is removed, committed and pushed (exit `0`); merging stays
+with `prwait` and `ghmerge`.
+
 ## Why
 
 The fuzz targets of a module are a security control only if they are actually
