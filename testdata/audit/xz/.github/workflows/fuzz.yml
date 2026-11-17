@@ -26,7 +26,7 @@ jobs:
           go-version: '1.27.3'
           cache: true
       - run: GOMEMLIMIT=2GiB go test . -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 120s
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: crashers-${{ matrix.target }}
