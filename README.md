@@ -78,11 +78,28 @@ target of the package fuzzes none, and `-fuzz` with several packages (`./...` ov
 a multi-package module) is refused by the go tool. Those steps are reported as
 `NOTE`s and their targets stay gaps.
 
-`${{ matrix.KEY }}` in a `-fuzz` pattern is expanded from the job's
-`strategy.matrix` (list values and `include` entries). A step the audit cannot
-read (a pattern computed by the shell, `make fuzz`, a script, a
-`working-directory`) makes the uncovered targets `UNCERTAIN` instead of `GAP`;
-they do not fail the audit.
+`${{ matrix.KEY }}` is expanded from the job's `strategy.matrix` **anywhere in
+the step's script** — the `-fuzz` pattern, the package operand, both — because a
+matrix lane names them together: `-fuzz '^${{ matrix.target }}$' ${{ matrix.pkg }}`.
+Expanding only the pattern left the package literal, so the step read as
+computed at run time and every target it covers came out `UNCERTAIN`: measured
+on go-crdt/crdt, **35 targets, 35 uncertain, exit 0** — a lane green while
+deciding nothing, over a matrix written out in full in the file. With the
+package expanded the same repository reports 20 covered and 15 uncertain, the
+15 being a lane whose pattern a shell loop builds.
+
+⛔ The combinations are **paired, not crossed**. The list keys give the cross
+product, `exclude` removes what it matches, and each `include` entry is a job of
+its own — so twenty `include` entries pairing a package with a target stay
+twenty jobs rather than becoming sixty. Coverage is keyed by (package, target),
+so an invented job could mark a target covered when the same target name exists
+in the other package, and a false "covered" is the one answer an audit must not
+produce. A matrix holding **both** a list and `include` is not a pairing this
+reads: the two are crossed and the report says so in a `NOTE`.
+
+A step the audit cannot read (a pattern computed by the shell, `make fuzz`, a
+script, a `working-directory`) makes the uncovered targets `UNCERTAIN` instead
+of `GAP`; they do not fail the audit.
 
 Exit status: `0` everything covered or uncertain (a repository with no targets is `0` with a
 note), `1` gaps or a blanket `continue-on-error`, `2` nothing could be read (no

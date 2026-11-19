@@ -175,6 +175,74 @@ func TestAuditMatrixXZ(t *testing.T) {
 	}
 }
 
+// ⛔ THE PACKAGE OPERAND COMES FROM THE MATRIX TOO, which #14 measured this
+// audit not reading: go-crdt/crdt's lane names both the pattern and the package
+// through `matrix`, and the audit answered "35 targets, 0 without a workflow,
+// 35 uncertain" and exited 0 -- green while deciding nothing, over a matrix
+// written out in full in the file.
+//
+// ⭐ AND THE PAIRING IS WHAT THIS SUBJECT IS FOR. `FuzzShared` exists in BOTH
+// packages and the matrix pairs it with the root one only, so:
+//
+//	paired (right)        ./sub FuzzShared is a GAP
+//	crossed (wrong)       the invented job (./sub, FuzzShared) covers it
+//
+// A fixture without a shared target name cannot tell those two apart, and the
+// crossed reading is the plausible shortcut.
+func TestAuditMatrixPairsPackageWithTarget(t *testing.T) {
+	out, _, code := execute(t, "audit", "--dir", "testdata/audit/matrix-pairs")
+	if !strings.Contains(out, "uncertain") && !strings.Contains(out, "0 uncertain") {
+		t.Fatalf("summary missing:\n%s", out)
+	}
+	if !strings.Contains(out, "audit: 4 targets, 1 without a workflow, 0 blanket continue-on-error, 0 uncertain") {
+		t.Fatalf("exit %d, summary wrong:\n%s", code, out)
+	}
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (one target is a gap)\n%s", code, out)
+	}
+	if !strings.Contains(out, "GAP ./sub FuzzShared") {
+		t.Errorf("./sub FuzzShared must be a GAP: the matrix pairs FuzzShared with the ROOT package only\n%s", out)
+	}
+	for _, covered := range []string{"GAP ./. FuzzShared", "GAP ./. FuzzRootOnly", "GAP ./sub FuzzSubOnly"} {
+		if strings.Contains(out, covered) {
+			t.Errorf("%q: that pair IS in the matrix\n%s", covered, out)
+		}
+	}
+
+	// The control for the fix itself: drop the package from the matrix and the
+	// step goes back to being unreadable, which is the honest answer.
+	d := cloneSubject(t, "testdata/audit/matrix-pairs")
+	p := filepath.Join(d, ".github/workflows/fuzz.yml")
+	b, _ := os.ReadFile(p)
+	m := strings.Replace(string(b), "${{ matrix.pkg }}", "${{ matrix.nosuchkey }}", 1)
+	if m == string(b) {
+		t.Fatal("mutation did not apply")
+	}
+	write(t, p, m)
+	out, _, code = execute(t, "audit", "--dir", d)
+	if !strings.Contains(out, "uncertain") || strings.Contains(out, "0 uncertain") {
+		t.Errorf("a key the matrix does not define must stay UNCERTAIN, not be guessed\n%s", out)
+	}
+}
+
+// A matrix holding BOTH a list and `include` is not a pairing this reads, and
+// the report says so rather than claiming one.
+func TestAuditMixedMatrixSaysThePairingIsNotRead(t *testing.T) {
+	d := cloneSubject(t, "testdata/audit/matrix-pairs")
+	p := filepath.Join(d, ".github/workflows/fuzz.yml")
+	b, _ := os.ReadFile(p)
+	m := strings.Replace(string(b), "      matrix:\n        include:",
+		"      matrix:\n        extra: [a, b]\n        include:", 1)
+	if m == string(b) {
+		t.Fatal("mutation did not apply")
+	}
+	write(t, p, m)
+	out, _, _ := execute(t, "audit", "--dir", d)
+	if !strings.Contains(out, "crossed rather than paired") {
+		t.Errorf("a mixed matrix must be declared, not silently crossed\n%s", out)
+	}
+}
+
 // go-simd/bitset's real fuzz.yml runs every step over ./... ; bench/interleave
 // is a nested module, so that is ONE package and go test accepts it. The first
 // version of the audit counted two packages and called every step refused.

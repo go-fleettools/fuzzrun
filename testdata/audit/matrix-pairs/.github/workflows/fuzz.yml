@@ -1,0 +1,21 @@
+# Shaped exactly like go-crdt/crdt's fuzz lane: a static `include` pairing a
+# PACKAGE with a TARGET, the pattern and the package both read from the matrix,
+# and the output piped through tee.
+name: fuzz
+
+on: push
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: ".",     target: FuzzShared }
+          - { pkg: ".",     target: FuzzRootOnly }
+          - { pkg: "./sub", target: FuzzSubOnly }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fuzz ${{ matrix.target }}
+        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 30s ${{ matrix.pkg }} 2>&1 | tee fuzz.log
