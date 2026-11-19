@@ -82,47 +82,167 @@ func scalarStr(v any) (string, bool) {
 	return "", false
 }
 
-// matrixValues lists the values a matrix key takes: its own list and the
-// "include" entries that set it.
-func matrixValues(m map[string]any, key string) []string {
-	var out []string
-	if l, ok := m[key].([]any); ok {
-		for _, e := range l {
-			if s, ok := scalarStr(e); ok {
-				out = append(out, s)
-			}
-		}
+// listValues reads the scalar values of one matrix key's own list.
+func listValues(v any) []string {
+	l, ok := v.([]any)
+	if !ok {
+		return nil
 	}
-	if inc, ok := m["include"].([]any); ok {
-		for _, e := range inc {
-			if em, ok := e.(map[string]any); ok {
-				if s, ok := scalarStr(em[key]); ok {
-					out = append(out, s)
-				}
-			}
+	var out []string
+	for _, e := range l {
+		if s, ok := scalarStr(e); ok {
+			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// expandMatrix replaces each ${{ matrix.KEY }} in s by every value of the job's
-// matrix; ok is false when a key has no known value.
-func expandMatrix(s string, m map[string]any) (out []string, ok bool) {
-	out = []string{s}
-	for _, ref := range matrixRef.FindAllStringSubmatch(s, -1) {
-		vals := matrixValues(m, ref[1])
-		if len(vals) == 0 {
-			return nil, false
+// A combination is one job of a matrix: what GitHub gives each
+// ${{ matrix.KEY }} for that job.
+type combination map[string]string
+
+// matrixCombinations lists the jobs a static matrix produces, and says whether
+// the pairing is exact.
+//
+// ⛔ THE PAIRING IS THE POINT, AND EXPANDING EACH REFERENCE ALONE LOSES IT.
+// go-crdt/crdt's fuzz lane is twenty `include` entries, each pairing a package
+// with a target -- {pkg: ".", target: FuzzParseOps} -- so a per-key expansion
+// crosses every package with every target and invents jobs that never ran.
+// Coverage here is keyed by (package, target), so an invented job can only mark
+// something covered when the SAME target name exists in the other package --
+// and a false "covered" is the one answer an audit must never produce.
+//
+// GitHub's rules as this reads them: the list keys give the cross product,
+// `exclude` removes the combinations it matches, and each `include` entry is a
+// job of its own, which is the shape every fuzz matrix in this fleet uses. A
+// matrix holding BOTH lists and `include` is not modelled: the two are crossed
+// so that nothing is left unresolved, and exact is false so the caller can say
+// the pairing is not one this read.
+func matrixCombinations(m map[string]any) (out []combination, exact bool) {
+	if len(m) == 0 {
+		return nil, true
+	}
+	keys := make([]string, 0, len(m))
+	for k, v := range m {
+		if k == "include" || k == "exclude" {
+			continue
 		}
-		var next []string
-		for _, o := range out {
-			for _, v := range vals {
-				next = append(next, strings.ReplaceAll(o, ref[0], v))
+		if len(listValues(v)) > 0 {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	product := []combination{{}}
+	for _, k := range keys {
+		var next []combination
+		for _, c := range product {
+			for _, v := range listValues(m[k]) {
+				n := make(combination, len(c)+1)
+				for ck, cv := range c {
+					n[ck] = cv
+				}
+				n[k] = v
+				next = append(next, n)
 			}
 		}
-		out = next
+		product = next
 	}
-	return out, true
+	if len(keys) == 0 {
+		product = nil
+	}
+	product = withoutExcluded(product, m["exclude"])
+
+	var inc []combination
+	if l, ok := m["include"].([]any); ok {
+		for _, e := range l {
+			em, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			c := combination{}
+			for k, v := range em {
+				if s, ok := scalarStr(v); ok {
+					c[k] = s
+				}
+			}
+			if len(c) > 0 {
+				inc = append(inc, c)
+			}
+		}
+	}
+	switch {
+	case len(product) == 0:
+		return inc, true
+	case len(inc) == 0:
+		return product, true
+	default:
+		out = append(out, product...)
+		for _, i := range inc {
+			for _, p := range product {
+				n := make(combination, len(p)+len(i))
+				for k, v := range p {
+					n[k] = v
+				}
+				for k, v := range i {
+					n[k] = v
+				}
+				out = append(out, n)
+			}
+		}
+		return out, false
+	}
+}
+
+// withoutExcluded drops the combinations an `exclude` entry matches: every key
+// the entry names has that value. Ignoring exclude would mark a target covered
+// by a job GitHub never runs.
+func withoutExcluded(in []combination, exclude any) []combination {
+	l, ok := exclude.([]any)
+	if !ok || len(in) == 0 {
+		return in
+	}
+	var out []combination
+	for _, c := range in {
+		excluded := false
+		for _, e := range l {
+			em, ok := e.(map[string]any)
+			if !ok || len(em) == 0 {
+				continue
+			}
+			all := true
+			for k, v := range em {
+				s, ok := scalarStr(v)
+				if !ok || c[k] != s {
+					all = false
+					break
+				}
+			}
+			if all {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// substitute replaces every ${{ matrix.KEY }} in s with this combination's
+// value; ok is false when a reference has none, which leaves the text as it was
+// so the caller still reports it as computed at run time.
+func substitute(s string, c combination) (string, bool) {
+	out, ok := s, true
+	for _, ref := range matrixRef.FindAllStringSubmatch(s, -1) {
+		v, found := c[ref[1]]
+		if !found {
+			ok = false
+			continue
+		}
+		out = strings.ReplaceAll(out, ref[0], v)
+	}
+	return out, ok
 }
 
 // isTrue reports a continue-on-error value that is the literal true.
@@ -429,16 +549,47 @@ func auditAt(dir string, requireRoot bool) (*auditReport, error) {
 						}
 					}
 				}
-				for _, inv := range invs {
-					pats, ok := expandMatrix(inv.pattern, job.Strategy.Matrix)
-					if !ok {
-						pats = []string{inv.pattern} // left computed below
+				// ⛔ THE PACKAGE IS SUBSTITUTED TOO, which is what this used to
+				// miss: the -fuzz pattern was expanded and the package operand
+				// beside it was left as `${{ matrix.pkg }}`, so the step was
+				// classified as computed at run time and every target it covers
+				// came out UNCERTAIN. Measured on go-crdt/crdt: 35 targets, 35
+				// uncertain, exit 0 -- a lane green while deciding nothing,
+				// over a matrix written out in full in the file.
+				combos, exact := matrixCombinations(job.Strategy.Matrix)
+				if len(combos) == 0 {
+					combos = []combination{nil} // no matrix: one pass, as written
+				}
+				// ⛔ AND THE SUBSTITUTION IS ON THE SCRIPT, NOT ON THE PARSED
+				// OPERANDS. Substituting each operand was the obvious shape and
+				// it did nothing: `words` splits on whitespace, so
+				// `${{ matrix.pkg }}` arrives as THREE words -- `${{`,
+				// `matrix.pkg`, `}}` -- and no one of them holds a reference to
+				// replace. The test written for the defect reproduced it
+				// unchanged, which is how this was found rather than shipped.
+				// Substituting before the scan resolves the pattern, the
+				// package and anything else the step reads, by one rule.
+				seen := map[string]bool{}
+				for _, c := range combos {
+					script := st.Run
+					if c != nil {
+						script, _ = substitute(script, c)
 					}
-					for _, p := range pats {
-						one := inv
-						one.pattern = p
-						auditInvocation(rep, ts, all, one, base, jn, label, covered, why)
+					cinvs, _, _ := scanRun(script)
+					for _, inv := range cinvs {
+						// A reference no combination resolves keeps its `${{`,
+						// and auditInvocation still calls it computed: that is
+						// the honest answer and it is left alone here.
+						key := inv.pattern + "\x00" + strings.Join(inv.pkgs, " ")
+						if seen[key] {
+							continue // the same job twice says nothing twice
+						}
+						seen[key] = true
+						auditInvocation(rep, ts, all, inv, base, jn, label, covered, why)
 					}
+				}
+				if !exact && len(invs) > 0 {
+					rep.notes = append(rep.notes, fmt.Sprintf("%s: job %s, %q: the matrix holds both a list and `include`, so the combinations were crossed rather than paired: a target may read as covered by a job that never ran", base, jn, label))
 				}
 			}
 		}
