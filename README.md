@@ -89,7 +89,10 @@ Finds the fuzz targets no workflow fuzzes. It parses the test files for the
 `GAP` line per target that no step fuzzes, and a `BLANKET` line per fuzz step
 under `continue-on-error: true` (a step that cannot fail cannot say that nothing
 was fuzzed). A step running `fuzzrun run` covers every target (or those of its
-`--package`). Otherwise only a `go test -fuzz` that go test would really run
+`--package`); the program is any shell word whose last path element is
+`fuzzrun`, quoted or not — `fuzzrun`, `"$(go env GOPATH)/bin/fuzzrun"`,
+`go run github.com/go-fleettools/fuzzrun@vX run` — while `echo "fuzzrun run"`,
+a `# … fuzzrun run` comment or `xfuzzrun run` are not calls. Otherwise only a `go test -fuzz` that go test would really run
 counts: the pattern is an unanchored regexp, a pattern matching more than one
 target of the package fuzzes none, and `-fuzz` with several packages (`./...` over
 a multi-package module) is refused by the go tool. Those steps are reported as

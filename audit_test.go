@@ -154,6 +154,56 @@ func TestAuditRegexpAndShape(t *testing.T) {
 	}
 }
 
+// fuzzrun#18: the program is recognised by its last path element, quoted or
+// not, and nothing else that merely contains the word is.
+func TestScanRunFuzzrunForms(t *testing.T) {
+	for _, c := range []struct {
+		line string
+		want bool
+		pkgs string
+	}{
+		// the exact line go-crdt/crdt#185 first shipped.
+		{`"$(go env GOPATH)/bin/fuzzrun" run --package structured --time 30s`, true, "structured"},
+		{`'/home/runner/go/bin/fuzzrun' run --package=a`, true, "a"},
+		{`$(go env GOPATH)/bin/fuzzrun run`, true, ""},
+		{`fuzzrun run --package x --package y`, true, "x,y"},
+		{`fuzzrun -v run`, true, ""},
+		{`go run github.com/go-fleettools/fuzzrun@v0.7.0 run --time 3m`, true, ""},
+		{`set +e; "${BIN}/fuzzrun" run --package p || true`, true, "p"},
+		// controls: none of these runs fuzzrun.
+		{`fuzzrun-other run`, false, ""},
+		{`xfuzzrun run`, false, ""},
+		{`fuzzrun audit`, false, ""},
+		{`echo "fuzzrun run"`, false, ""},
+		{`echo done # fuzzrun run`, false, ""},
+		{`# fuzzrun run`, false, ""},
+	} {
+		_, got, pkgs := scanRun(c.line)
+		if got != c.want || strings.Join(pkgs, ",") != c.pkgs {
+			t.Errorf("%s: fuzzrun=%v pkgs=%q, want %v %q", c.line, got, pkgs, c.want, c.pkgs)
+		}
+	}
+}
+
+// FuzzScanRun: a workflow's run: script is untrusted text. scanRun must not
+// panic on it, and a recognised fuzzrun call returns a suffix of its words.
+func FuzzScanRun(f *testing.F) {
+	for _, s := range []string{
+		`"$(go env GOPATH)/bin/fuzzrun" run --package structured`,
+		"go test -run '^$' -fuzz FuzzA -fuzztime 1m ./...\nfuzzrun run",
+		`fuzzrun -v run --package="a b"`, `echo "fuzzrun run" # x`, "a \\\n b | c && d; e", `'`, "/@", "",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		scanRun(s)
+		ws := words(s)
+		if args, ok := fuzzrunArgs(s); ok && (len(args) >= len(ws) || strings.Join(args, "\x00") != strings.Join(ws[len(ws)-len(args):], "\x00")) {
+			t.Fatalf("%q: args %q are not a strict suffix of %q", s, args, ws)
+		}
+	})
+}
+
 // go-compressions/xz's real fuzz.yml names its targets through a matrix.
 func TestAuditMatrixXZ(t *testing.T) {
 	out, _, code := execute(t, "audit", "--dir", "testdata/audit/xz")
