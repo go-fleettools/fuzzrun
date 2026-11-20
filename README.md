@@ -36,20 +36,37 @@ fuzzrun run [--dir .] [--time 10m] [--jobs 3] [--parallel 2] \
 - `--package` keeps only matching packages (`path.Match` on the module-relative
   directory, or `dir/...` for a subtree); repeatable.
 - A target that fails with a `Failing input written to testdata/fuzz/<Name>/<hash>`
-  line is a `CRASH`, and the summary gives that path relative to the module. Any
-  other failing exit is a `FAIL` with the log to read.
+  line is a `CRASH`, and the summary gives that path relative to the module.
+- A target that fails with `context deadline exceeded` and wrote **no** failing
+  input is a `DEADLINE`: the fuzz coordinator's own deadline arrived while a
+  worker was still inside an input, with nothing found. It is printed with its
+  log and counted, and it does **not** make the run exit 1. ⛔ The crasher is
+  checked first: a target can reach the deadline after writing a failing input,
+  its output then holds both strings, and it is a `CRASH`.
+- Any other failing exit is a `FAIL` with the log to read.
 
 Summary:
 
 ```text
-PASS  ./. FuzzGood 5s
-CRASH ./. FuzzBad  1.2s testdata/fuzz/FuzzBad/6f1c...
-2 targets: 1 PASS, 0 FAIL, 1 CRASH
+PASS     ./. FuzzGood 5s
+CRASH    ./. FuzzBad  1.2s testdata/fuzz/FuzzBad/6f1c...
+DEADLINE ./. FuzzSlow 30.4s (exit status 1; log …/root-FuzzSlow.log)
+3 targets: 1 PASS, 0 FAIL, 1 CRASH, 1 DEADLINE
 ```
 
-Exit status: `0` every target passed, `1` at least one `FAIL` or `CRASH`,
-`2` the run could not be made (no `go.mod`, no targets, `go` missing, bad flags,
-unreadable load with `--max-load`).
+Exit status: `0` every target passed or reached the deadline, `1` at least one
+`FAIL` or `CRASH`, `2` the run could not be made (no `go.mod`, no targets, `go`
+missing, bad flags, unreadable load with `--max-load`).
+
+⛔ **Why the deadline has a verdict of its own.** Until v0.7.0 it was a `FAIL`, so
+exit 1 could not tell a crash from weather, and the workflow `fuzzrun workflow`
+writes had to tolerate exit 1 — which keeps a lane green on the benign deadline
+**and on a real crasher**, visible then only in the log. A lane that wants
+"a crash is red, a deadline warns" had to keep its own shell loop: go-crdt/crdt's
+hostile lane does exactly that (go-crdt/crdt#184), and could not move to `run`
+without losing it. The `DEADLINE` count is appended after `CRASH` rather than
+inserted, so `adopt`'s parser of this line keeps reading it, and a deadline now
+reads there as `0 FAIL` instead of masquerading as one.
 
 ## `fuzzrun wait`
 

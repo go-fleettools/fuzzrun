@@ -35,7 +35,39 @@ const (
 	vPass  verdict = "PASS"
 	vFail  verdict = "FAIL"
 	vCrash verdict = "CRASH"
+	// vDeadline is the fuzz coordinator's own deadline: `go test` exited
+	// non-zero with "context deadline exceeded" because a worker did not wind
+	// down within -fuzztime, and NO failing input was written. It is printed
+	// and counted, never silent, and it does not make the run exit 1 -- see
+	// classify for why that is the line to draw.
+	vDeadline verdict = "DEADLINE"
 )
+
+// classify decides a FAILING target's verdict from what `go test` printed.
+//
+// ⛔ BEFORE THIS, EVERY NON-CRASH FAILURE WAS `FAIL`, the coordinator's deadline
+// included, and `fail + crash > 0` exits 1 -- so exit 1 could not tell a crash
+// from weather. This repository's own generated workflow therefore tolerated
+// exit 1, which keeps a lane green on the benign deadline AND on a real
+// crasher, visible then only in the log. go-crdt/crdt's hostile lane draws the
+// line by hand instead -- `Failing input written to` is red, `context deadline
+// exceeded` is a warning -- and could not move to `run` without losing that
+// (go-fleettools/fuzzrun#16, go-crdt/crdt#184). This is the same signature, in
+// the same order.
+//
+// ⛔ THE ORDER IS THE POINT: a target can reach the deadline AFTER writing a
+// failing input, and its output then holds both strings. The crasher decides.
+// A hang that the go tool does not turn into a failing input reads as a
+// deadline here, which is the trade the hand-written lane makes too.
+func classify(output, pkg string) (verdict, string) {
+	if p, ok := parseCrasher(output, pkg); ok {
+		return vCrash, p
+	}
+	if strings.Contains(output, "context deadline exceeded") {
+		return vDeadline, ""
+	}
+	return vFail, ""
+}
 
 type result struct {
 	t      target
@@ -217,9 +249,8 @@ func runOne(dir, logs string, t target, fuzzTime string, parallel int) result {
 		r.note = "log unreadable: " + err.Error()
 		return r
 	}
-	if p, ok := parseCrasher(string(b), t.pkg); ok {
-		r.v, r.corpus = vCrash, p
-	} else {
+	r.v, r.corpus = classify(string(b), t.pkg)
+	if r.v != vCrash {
 		r.note = runErr.Error()
 	}
 	return r
@@ -229,7 +260,7 @@ func line(r result) string {
 	s := fmt.Sprintf("%s %s %s %s", r.v, r.t.pkg, r.t.name, r.dur.Round(100*time.Millisecond))
 	if r.corpus != "" {
 		s += " " + r.corpus
-	} else if r.v == vFail {
+	} else if r.v == vFail || r.v == vDeadline {
 		s += " (" + r.note + "; log " + r.log + ")"
 	}
 	return s
@@ -244,7 +275,7 @@ func summarize(out io.Writer, results []result) error {
 		return a.name < b.name
 	})
 	fmt.Fprintln(out, "== summary ==")
-	var pass, fail, crash int
+	var pass, fail, crash, deadline int
 	for _, r := range results {
 		fmt.Fprintln(out, line(r))
 		switch r.v {
@@ -254,9 +285,15 @@ func summarize(out io.Writer, results []result) error {
 			fail++
 		case vCrash:
 			crash++
+		case vDeadline:
+			deadline++
 		}
 	}
-	fmt.Fprintf(out, "%d targets: %d PASS, %d FAIL, %d CRASH\n", len(results), pass, fail, crash)
+	// ⚠ APPENDED, NOT REORDERED: adopt parses this line with
+	// `(\d+) targets: (\d+) PASS, (\d+) FAIL, (\d+) CRASH`, and a suffix keeps
+	// that matching -- while a deadline stops masquerading as a FAIL in its
+	// "0 FAIL, 0 CRASH" gate.
+	fmt.Fprintf(out, "%d targets: %d PASS, %d FAIL, %d CRASH, %d DEADLINE\n", len(results), pass, fail, crash, deadline)
 	if fail+crash > 0 {
 		return &exitError{code: 1}
 	}
