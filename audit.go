@@ -257,7 +257,6 @@ func isTrue(v any) bool {
 }
 
 var (
-	fuzzrunRun   = regexp.MustCompile(`fuzzrun(@\S+)?\s+(?:-\S+\s+)*run\b`)
 	goTestInvoke = regexp.MustCompile(`\bgo\s+test\b`)
 	shellVar     = regexp.MustCompile(`\$\{|\$\(|\$[A-Za-z_]`)
 	cmdSep       = regexp.MustCompile(`&&|\|\||[;|]`)
@@ -307,6 +306,36 @@ func words(s string) []string {
 	return out
 }
 
+// fuzzrunArgs reports whether seg invokes `fuzzrun run`, and returns the words
+// after `run`. The program is any word whose last path element is fuzzrun,
+// optionally with an @version — `fuzzrun`, `"$(go env GOPATH)/bin/fuzzrun"`,
+// `github.com/go-fleettools/fuzzrun@v0.7.0` — read through words(), so a quoted
+// path counts like a bare one (fuzzrun#18). Flags may sit between program and
+// verb; a word starting with # ends the command.
+func fuzzrunArgs(seg string) ([]string, bool) {
+	ws := words(seg)
+	for i, w := range ws {
+		if strings.HasPrefix(w, "#") {
+			return nil, false
+		}
+		base := w[strings.LastIndexByte(w, '/')+1:]
+		if at := strings.IndexByte(base, '@'); at >= 0 {
+			base = base[:at]
+		}
+		if base != "fuzzrun" {
+			continue
+		}
+		j := i + 1
+		for j < len(ws) && strings.HasPrefix(ws[j], "-") {
+			j++
+		}
+		if j < len(ws) && ws[j] == "run" {
+			return ws[j+1:], true
+		}
+	}
+	return nil, false
+}
+
 // invocation is one `go test -fuzz PATTERN pkgs...` found in a run script.
 type invocation struct {
 	pattern string
@@ -323,9 +352,8 @@ func scanRun(script string) (invs []invocation, fuzzr bool, fuzzrPkgs []string) 
 			continue
 		}
 		for _, seg := range cmdSep.Split(line, -1) {
-			if m := fuzzrunRun.FindStringIndex(seg); m != nil {
+			if ws, ok := fuzzrunArgs(seg); ok {
 				fuzzr = true
-				ws := words(seg[m[1]:])
 				for i := 0; i < len(ws); i++ {
 					switch {
 					case ws[i] == "--package" && i+1 < len(ws):
