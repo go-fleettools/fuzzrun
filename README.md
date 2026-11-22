@@ -162,6 +162,32 @@ Once the run on the branch has finished, `finish` reads the latest push run of
 Otherwise the trigger is removed, committed and pushed (exit `0`); merging stays
 with `prwait` and `ghmerge`.
 
+## `fuzzrun seedcorpus`
+
+```sh
+fuzzrun run --time 20s          # fills the Go fuzz cache
+fuzzrun seedcorpus [--dir .] [--cache DIR] [--max 40] [--max-bytes 65536]
+```
+
+Copies the inputs the fuzz engine cached (`$GOCACHE/fuzz/<module path>`, which
+`go test -fuzz` fills; only crashers are written under `testdata/fuzz`) into
+`testdata/fuzz/<Target>/`: per target the `--max` smallest files, none over
+`--max-bytes`. The corpus stays small and holds inputs only, so the blocking CI
+run replays what a nightly run would otherwise rediscover.
+
+## `fuzzrun scan`
+
+```sh
+fuzzrun scan --org ORG REPO...
+```
+
+Reads `.github/workflows/fuzz.yml` of each repo from raw.githubusercontent.com
+(no REST budget) and prints `fuzzrun=… tolerant=… continue-on-error=…`.
+`tolerant` is the exit-1 tolerance (`-ge 2`) written by `fuzzrun workflow`
+before v0.8.0, which lets a crasher finish green (#23). A file that could not
+be read is `NOT READ`, never an absence. Exit 1 when a repo is tolerant or not
+read.
+
 ## Why
 
 The fuzz targets of a module are a security control only if they are actually
