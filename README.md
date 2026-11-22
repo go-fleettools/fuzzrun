@@ -119,11 +119,14 @@ reads: the two are crossed and the report says so in a `NOTE`.
 
 A step the audit cannot read (a pattern computed by the shell, `make fuzz`, a
 script, a `working-directory`) makes the uncovered targets `UNCERTAIN` instead
-of `GAP`; they do not fail the audit.
+of `GAP`; they do not fail the audit — unless **every** target is uncertain.
+Then the audit decided nothing, and that is exit `2`, not the `0` it gave before
+v0.8.0: an answer not obtained is not a negative.
 
-Exit status: `0` everything covered or uncertain (a repository with no targets is `0` with a
-note), `1` gaps or a blanket `continue-on-error`, `2` nothing could be read (no
-`go.mod`, no workflows, a parse error).
+Exit status: `0` everything covered, or some covered and the rest uncertain (a
+repository with no targets is `0` with a note), `1` gaps or a blanket
+`continue-on-error`, `2` nothing could be read (no `go.mod`, no workflows, a
+parse error, or every target uncertain).
 
 `fuzzrun census --root <dir> [--report file]` runs the audit over every
 `<dir>/<org>/<repo>` clone (the layout of `gorequires --clone-dir`) and writes a
