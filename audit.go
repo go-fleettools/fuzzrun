@@ -724,7 +724,8 @@ that go test would really run counts (the pattern is an unanchored regexp, must
 match exactly one target, and the step must name a single package).
 
 Exit status: 0 everything covered (or no targets), 1 gaps or a blanket
-continue-on-error, 2 nothing could be read (no go.mod, no workflows, a parse error).`,
+continue-on-error, 2 nothing could be read (no go.mod, no workflows, a parse error,
+or every target uncertain because no step fuzzing it could be read).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			rep, err := audit(dir)
@@ -734,6 +735,16 @@ continue-on-error, 2 nothing could be read (no go.mod, no workflows, a parse err
 			rep.write(cmd.OutOrStdout())
 			if len(rep.gaps)+len(rep.blanket) > 0 {
 				return &exitError{code: 1}
+			}
+			// ⛔ EVERY TARGET UNCERTAIN IS AN AUDIT THAT DECIDED NOTHING, and it
+			// used to exit 0. go-crdt/crdt measured it before #15: 35 targets,
+			// 35 uncertain, a green lane over a workflow the audit could not
+			// read. An answer not obtained is not a negative, so it is the
+			// "could not be read" status. A PARTLY uncertain module still
+			// exits 0: some target was read as covered, and the UNCERTAIN lines
+			// name the rest.
+			if len(rep.targets) > 0 && len(rep.unsure) == len(rep.targets) {
+				return &exitError{2, fmt.Errorf("all %d targets are uncertain: no workflow step could be read as fuzzing any of them", len(rep.targets))}
 			}
 			return nil
 		},

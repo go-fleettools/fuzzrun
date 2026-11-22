@@ -338,9 +338,16 @@ func TestAuditUncertain(t *testing.T) {
 		"unknown matrix": "          go test -fuzz '${{ matrix.zz }}' .\n",
 	} {
 		out, code := mk(run)
-		if code != 0 || strings.Contains(out, "GAP ") || !strings.Contains(out, "UNCERTAIN ./. FuzzA") || !strings.Contains(out, "0 without a workflow") || !strings.Contains(out, "2 uncertain") {
+		// every target uncertain: the audit decided nothing, which is exit 2,
+		// not the 0 it used to give.
+		if code != 2 || strings.Contains(out, "GAP ") || !strings.Contains(out, "UNCERTAIN ./. FuzzA") || !strings.Contains(out, "0 without a workflow") || !strings.Contains(out, "2 uncertain") {
 			t.Errorf("%s: exit %d\n%s", name, code, out)
 		}
+	}
+	// The boundary: one target read as covered, the other uncertain, is a
+	// partial answer and stays 0 -- the UNCERTAIN line names what is left.
+	if out, code := mk("          go test -fuzz '^FuzzA$' .\n          make fuzz\n"); code != 0 || !strings.Contains(out, "UNCERTAIN ./. FuzzB") || !strings.Contains(out, "1 uncertain") {
+		t.Errorf("partly uncertain: exit %d\n%s", code, out)
 	}
 	// a readable step that covers one target leaves the other a GAP when nothing is uncertain.
 	if out, code := mk("          go test -fuzz '^FuzzA$' .\n"); code != 1 || !strings.Contains(out, "GAP ./. FuzzB") {
