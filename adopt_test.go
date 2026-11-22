@@ -221,6 +221,36 @@ func TestAdoptFinishReadsLargeJobLogs(t *testing.T) {
 	}
 }
 
+func TestAdoptFinishRefusesUnreadableJobLog(t *testing.T) {
+	d := finishRepo(t)
+	f := &fakeRunner{handler: func(tool string, a []string) (string, error) {
+		switch {
+		case tool == "git" && a[0] == "remote":
+			return "https://github.com/o/r\n", nil
+		case tool == "git" && a[0] == "rev-parse" && a[1] == "--abbrev-ref":
+			return "fuzzrun-workflow\n", nil
+		case tool == "git" && a[0] == "rev-parse":
+			return testSHA + "\n", nil
+		case tool == "gh" && a[1] == "list":
+			return `[{"databaseId":99,"headSha":"` + testSHA + `","status":"completed","conclusion":"success"}]`, nil
+		case tool == "gh" && a[0] == "api":
+			return "", errors.New("HTTP 404")
+		case tool == "gh" && a[1] == "view":
+			return goodJobs, nil
+		}
+		return "", nil
+	}}
+	withRunner(t, f)
+	_, _, code := execute(t, "adopt", "finish", "--dir", d)
+	if code != 2 || f.called("gitpush") {
+		t.Fatalf("unreadable job log: exit %d, calls %v", code, f.calls)
+	}
+	// the failed read stops the loop: the next job's log is not asked for.
+	if f.called("gh api repos/o/r/actions/jobs/102/logs") {
+		t.Fatalf("a failed read did not stop the loop:\n%s", strings.Join(f.calls, "\n"))
+	}
+}
+
 func TestAdoptFinishHappyPath(t *testing.T) {
 	f, _ := runFinish(t, finishCase{runSHA: testSHA, status: "completed", jobs: goodJobs, log: goodLog, wantCode: 0, wantPushed: true})
 	if !f.called("git commit -a -m fuzz: remove the temporary push trigger") {
