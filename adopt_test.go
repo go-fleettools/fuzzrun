@@ -151,7 +151,10 @@ func runFinish(t *testing.T, c finishCase) (*fakeRunner, string) {
 		case tool == "gh" && a[1] == "list":
 			return `[{"databaseId":99,"headSha":"` + c.runSHA + `","status":"` + c.status + `","conclusion":"success"}]`, nil
 		case tool == "gh" && a[1] == "view" && strings.Contains(strings.Join(a, " "), "--log"):
-			return c.log, nil
+			// what gh prints for an archive with no per-step files: nothing, exit 0 (#20).
+			return "", nil
+		case tool == "gh" && a[0] == "api" && strings.HasPrefix(a[1], "repos/o/r/actions/jobs/"):
+			return jobLog(c.log, a[1]), nil
 		case tool == "gh" && a[1] == "view":
 			return c.jobs, nil
 		}
@@ -176,10 +179,77 @@ func runFinish(t *testing.T, c finishCase) (*fakeRunner, string) {
 }
 
 const (
-	goodJobs = `{"jobs":[{"name":"fuzz (ubuntu-latest, amd64)","conclusion":"success"},{"name":"fuzz (ubuntu-24.04-arm, arm64)","conclusion":"success"}]}`
+	goodJobs = `{"jobs":[{"databaseId":101,"name":"fuzz (ubuntu-latest, amd64)","conclusion":"success"},{"databaseId":102,"name":"fuzz (ubuntu-24.04-arm, arm64)","conclusion":"success"}]}`
 	goodLog  = "fuzz (ubuntu-latest, amd64)\tfuzz every target\t2026-11-17T12:00:00Z 4 targets: 4 PASS, 0 FAIL, 0 CRASH\n" +
 		"fuzz (ubuntu-24.04-arm, arm64)\tfuzz every target\t2026-11-17T12:00:01Z 4 targets: 4 PASS, 0 FAIL, 0 CRASH\n"
 )
+
+// jobLog answers `gh api repos/o/r/actions/jobs/<id>/logs`: the lines of the
+// fixture whose first column names that job, without the column, as the API
+// serves a job's log.
+func jobLog(log, endpoint string) string {
+	names := map[string]string{
+		"101": "fuzz (ubuntu-latest, amd64)",
+		"102": "fuzz (ubuntu-24.04-arm, arm64)",
+	}
+	name := names[strings.Split(endpoint, "/")[5]]
+	if name == "" {
+		panic("unknown job in " + endpoint)
+	}
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(log, "\n") {
+		if job, rest, ok := strings.Cut(line, "\t"); ok && job == name {
+			b.WriteString(rest)
+		}
+	}
+	return b.String()
+}
+
+// A real fuzz job log is tens of KB with one ~1 MB line (a corpus dump); the
+// summary comes last. The verdict must not depend on the log's size.
+func TestAdoptFinishReadsLargeJobLogs(t *testing.T) {
+	var pad strings.Builder
+	for _, job := range []string{"fuzz (ubuntu-latest, amd64)", "fuzz (ubuntu-24.04-arm, arm64)"} {
+		for i := 0; i < 20000; i++ {
+			pad.WriteString(job + "\tfuzz every target\t2026-11-17T11:59:59Z elapsed: 3s, execs: 1234 (411/sec), new interesting: 0\n")
+		}
+		pad.WriteString(job + "\tfuzz every target\t" + strings.Repeat("x", 1<<20) + "\n")
+	}
+	f, _ := runFinish(t, finishCase{runSHA: testSHA, status: "completed", jobs: goodJobs, log: pad.String() + goodLog, wantCode: 0, wantPushed: true})
+	if !f.called("gh api repos/o/r/actions/jobs/101/logs") || !f.called("gh api repos/o/r/actions/jobs/102/logs") {
+		t.Fatalf("job logs not read by id:\n%s", strings.Join(f.calls, "\n"))
+	}
+}
+
+func TestAdoptFinishRefusesUnreadableJobLog(t *testing.T) {
+	d := finishRepo(t)
+	f := &fakeRunner{handler: func(tool string, a []string) (string, error) {
+		switch {
+		case tool == "git" && a[0] == "remote":
+			return "https://github.com/o/r\n", nil
+		case tool == "git" && a[0] == "rev-parse" && a[1] == "--abbrev-ref":
+			return "fuzzrun-workflow\n", nil
+		case tool == "git" && a[0] == "rev-parse":
+			return testSHA + "\n", nil
+		case tool == "gh" && a[1] == "list":
+			return `[{"databaseId":99,"headSha":"` + testSHA + `","status":"completed","conclusion":"success"}]`, nil
+		case tool == "gh" && a[0] == "api":
+			return "", errors.New("HTTP 404")
+		case tool == "gh" && a[1] == "view":
+			return goodJobs, nil
+		}
+		return "", nil
+	}}
+	withRunner(t, f)
+	_, _, code := execute(t, "adopt", "finish", "--dir", d)
+	if code != 2 || f.called("gitpush") {
+		t.Fatalf("unreadable job log: exit %d, calls %v", code, f.calls)
+	}
+	// the failed read stops the loop: the next job's log is not asked for.
+	if f.called("gh api repos/o/r/actions/jobs/102/logs") {
+		t.Fatalf("a failed read did not stop the loop:\n%s", strings.Join(f.calls, "\n"))
+	}
+}
 
 func TestAdoptFinishHappyPath(t *testing.T) {
 	f, _ := runFinish(t, finishCase{runSHA: testSHA, status: "completed", jobs: goodJobs, log: goodLog, wantCode: 0, wantPushed: true})

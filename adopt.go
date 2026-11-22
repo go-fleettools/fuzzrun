@@ -201,6 +201,7 @@ type ghRun struct {
 
 type ghJobs struct {
 	Jobs []struct {
+		DatabaseID int64  `json:"databaseId"`
 		Name       string `json:"name"`
 		Conclusion string `json:"conclusion"`
 	} `json:"jobs"`
@@ -287,26 +288,32 @@ committed and pushed, and the exit status is 0.`,
 					return &exitError{2, fmt.Errorf("job %q of run %d concluded %q", j.Name, found.DatabaseID, j.Conclusion)}
 				}
 			}
-			log, err := run("gh", "run", "view", id, "--repo", slug, "--log")
-			if err != nil {
-				return err
-			}
+			// One request per job, by job id: `gh run view --log` prints
+			// NOTHING (exit 0) when the run's log archive holds only the
+			// whole-job files and no per-step ones, as the archives of
+			// go-avkit/h264 and go-avkit/decode do (#20).
 			ok := map[string]bool{}
 			crashed := false
-			for _, line := range strings.Split(log, "\n") {
-				job, _, _ := strings.Cut(line, "\t")
-				if m := crashRe.FindStringSubmatch(line); m != nil {
-					crashed = true
-					fmt.Fprintf(out, "CRASH job %q: %s %s corpus %s\n", job, m[1], m[2], m[3])
+			for _, j := range jobs.Jobs {
+				log, err := run("gh", "api", fmt.Sprintf("repos/%s/actions/jobs/%d/logs", slug, j.DatabaseID))
+				if err != nil {
+					return err
 				}
-				if m := summaryRe.FindStringSubmatch(line); m != nil {
-					n, _ := strconv.Atoi(m[1])
-					p, _ := strconv.Atoi(m[2])
-					if m[4] != "0" {
+				job := j.Name
+				for _, line := range strings.Split(log, "\n") {
+					if m := crashRe.FindStringSubmatch(line); m != nil {
 						crashed = true
-						fmt.Fprintf(out, "CRASH job %q: %s\n", job, strings.TrimSpace(m[0]))
-					} else if m[3] == "0" && n == p && n > 0 {
-						ok[job] = true
+						fmt.Fprintf(out, "CRASH job %q: %s %s corpus %s\n", job, m[1], m[2], m[3])
+					}
+					if m := summaryRe.FindStringSubmatch(line); m != nil {
+						n, _ := strconv.Atoi(m[1])
+						p, _ := strconv.Atoi(m[2])
+						if m[4] != "0" {
+							crashed = true
+							fmt.Fprintf(out, "CRASH job %q: %s\n", job, strings.TrimSpace(m[0]))
+						} else if m[3] == "0" && n == p && n > 0 {
+							ok[job] = true
+						}
 					}
 				}
 			}
