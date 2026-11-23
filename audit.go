@@ -779,6 +779,7 @@ func censusCmd() *cobra.Command {
 					continue
 				}
 				name, _ := filepath.Rel(root, d)
+				name = filepath.ToSlash(name)
 				rep, err := audit(d)
 				if err != nil && !isModule(d) && hasNestedModule(d) {
 					rep, err = auditAt(d, false)
