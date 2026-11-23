@@ -31,7 +31,7 @@ func decoded(t *testing.T, s string) any {
 	return v
 }
 
-// go-simd/floats's fuzz.yml before #66 must become the one #66 wrote.
+// go-simd/floats's fuzz.yml before #66 must become the strict fuzzrun workflow.
 func TestRewriteFloatsOldIsNew(t *testing.T) {
 	old := readFile(t, "testdata/audit/floats-old/.github/workflows/fuzz.yml")
 	want := readFile(t, "testdata/audit/floats-new/.github/workflows/fuzz.yml")
@@ -43,6 +43,29 @@ func TestRewriteFloatsOldIsNew(t *testing.T) {
 		t.Fatalf("rewrite differs from floats#66:\n%s", got)
 	}
 	// idempotent: the new form has nothing left to replace.
+	if again, n, _ := rewriteWorkflow(got); n != 0 || again != got {
+		t.Fatalf("not idempotent: n=%d", n)
+	}
+}
+
+// A tolerant workflow written by earlier fuzzrun versions is rewritten to the strict form.
+func TestRewriteTolerantWorkflow(t *testing.T) {
+	old := readFile(t, "testdata/workflow/tolerant.yml")
+	want := readFile(t, "testdata/audit/floats-new/.github/workflows/fuzz.yml")
+	got, n, err := rewriteWorkflow(old)
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if strings.Contains(got, "-ge 2") || strings.Contains(got, "set +e") {
+		t.Fatalf("tolerant form survived:\n%s", got)
+	}
+	if !strings.Contains(got, "upload the crasher") || !strings.Contains(got, "fuzz-crashers-") {
+		t.Fatalf("missing crasher upload:\n%s", got)
+	}
+	if !reflect.DeepEqual(decoded(t, got), decoded(t, want)) {
+		t.Fatalf("rewrite differs from want:\n%s", got)
+	}
+	// idempotent:
 	if again, n, _ := rewriteWorkflow(got); n != 0 || again != got {
 		t.Fatalf("not idempotent: n=%d", n)
 	}

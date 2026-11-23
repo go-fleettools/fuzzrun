@@ -13,26 +13,12 @@ import (
 )
 
 // fuzzrunVersion is the release the generated workflows run.
-const fuzzrunVersion = "v0.5.0"
+const fuzzrunVersion = "v0.9.0"
 
-// The fuzz step is the one of go-simd/floats#66: exit 2 (the run could not be
-// made) is red, exit 1 (a crasher, or the benign -fuzztime deadline flake) is
-// tolerated, because a blanket continue-on-error reported a run that never
-// started as green after 15 seconds.
-const fuzzStepText = `      # fuzzrun exits 2 when the run could not be made (no targets, go missing,
-      # a toolchain it refuses): that is red. It exits 1 for a CRASH or for the
-      # benign deadline flake: tolerated here, the summary names any crasher and
-      # its corpus is uploaded below. A blanket continue-on-error hid exactly the
-      # first case: a run that never started was reported green.
-      - name: fuzz every target (found by parsing, not listed)
-        run: |
-          set +e
-          go run github.com/go-fleettools/fuzzrun@` + fuzzrunVersion + ` run --time 3m --jobs 2 --parallel 2 --logs fuzz-logs
-          status=$?
-          if [ "$status" -ge 2 ]; then
-            echo "::error::fuzzrun could not run (exit $status)"
-            exit "$status"
-          fi
+// fuzzStepText is the strict fuzz step: any non-zero exit fails the step, so
+// a run that finds a crasher turns the workflow red.
+const fuzzStepText = `      - name: fuzz every target (found by parsing, not listed)
+        run: go run github.com/go-fleettools/fuzzrun@` + fuzzrunVersion + ` run --time 3m --jobs 2 --parallel 2 --logs fuzz-logs
 `
 
 const oldComment = `# Steps are continue-on-error so the benign deadline flake never reds this workflow;
@@ -40,16 +26,27 @@ const oldComment = `# Steps are continue-on-error so the benign deadline flake n
 # (add it under testdata/fuzz to turn it into a permanent ci.yml regression case).
 `
 
-const newComment = `# The fuzz step tolerates fuzzrun's exit 1 (a crasher, or the benign deadline
+const tolerantComment = `# The fuzz step tolerates fuzzrun's exit 1 (a crasher, or the benign deadline
 # flake) so the flake never reds this workflow; any real crasher is printed in the
 # summary and its input is uploaded as an artifact (add it under testdata/fuzz to
 # turn it into a permanent ci.yml regression case). Exit 2, a run that could not
 # be made, is red.
-#
-# The targets are NOT listed here. fuzzrun finds every ` + "`func FuzzXxx(f *testing.F)`" + `
+`
+
+const redComment = `# A CRASHER IS RED. fuzzrun >= v0.7.0 gives the benign deadline its own verdict
+# (DEADLINE, exit 0) and exits 1 only for a CRASH or an unexplained FAIL, exit 2
+# when the run could not be made: every non-zero exit fails the step, and the
+# crasher's input is uploaded as an artifact (add it under testdata/fuzz to turn
+# it into a permanent ci.yml regression case). Before this the step tolerated
+# exit 1, so a run that FOUND a crasher finished green.
+`
+
+const targetsComment = `# The targets are NOT listed here. fuzzrun finds every ` + "`func FuzzXxx(f *testing.F)`" + `
 # by parsing the test files, so a new target is fuzzed without anyone remembering
 # to add a step.
 `
+
+const newComment = redComment + "#\n" + targetsComment
 
 // freshWorkflow is the nightly workflow of a repository that has none.
 const freshWorkflow = `name: fuzz
@@ -58,6 +55,7 @@ const freshWorkflow = `name: fuzz
 # intermittently exits non-zero with "context deadline exceeded" when a worker does
 # not wind down within -fuzztime even though no crasher was found, which made it a
 # false-red PR gate. The deterministic seed-corpus run stays in ci.yml (blocking).
+#
 ` + newComment + `on:
   schedule:
     - cron: '0 3 * * *'
@@ -75,11 +73,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with: { go-version: '1.27.4' }
-` + fuzzStepText + `      - name: upload any fuzz-discovered corpus
-        if: always()
+` + fuzzStepText + `      - name: upload the crasher
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-findings-${{ matrix.arch }}
+          name: fuzz-crashers-${{ matrix.arch }}
           path: testdata/fuzz/
           if-no-files-found: ignore
       - name: upload the per-target logs
@@ -107,10 +105,16 @@ func stepField(st *yaml.Node, key string) string {
 
 func isGoTestFuzz(st *yaml.Node) bool { return goTestFuzzRun.MatchString(stepField(st, "run")) }
 
+func isTolerantFuzzrun(st *yaml.Node) bool {
+	run := stepField(st, "run")
+	return strings.Contains(run, "fuzzrun") && strings.Contains(run, "-ge 2")
+}
+
 // rewriteWorkflow turns every job of src that fuzzes with one `go test -fuzz`
-// step per target into the fuzzrun form. It returns the new text and the number
-// of steps replaced (0: nothing to do). The jobs are found by parsing the YAML,
-// under the top-level `jobs:` key only; `gotip test` steps are left alone.
+// step per target, or with earlier versions' exit-1-tolerant step, into the
+// strict fuzzrun form. It returns the new text and the number of steps
+// replaced (0: nothing to do). The jobs are found by parsing the YAML, under
+// the top-level `jobs:` key only; `gotip test` steps are left alone.
 func rewriteWorkflow(src string) (string, int, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
@@ -158,6 +162,16 @@ func rewriteWorkflow(src string) (string, int, error) {
 		var bs []blk
 		anyFuzz := false
 		for si, st := range steps.Content {
+			start := st.Line - 1
+			if isTolerantFuzzrun(st) {
+				prevEnd := 0
+				if si > 0 {
+					prevEnd = bs[si-1].end
+				}
+				for start > prevEnd && (strings.TrimSpace(lines[start-1]) == "" || strings.HasPrefix(strings.TrimSpace(lines[start-1]), "#")) {
+					start--
+				}
+			}
 			end := jobEnd
 			if si+1 < len(steps.Content) {
 				end = steps.Content[si+1].Line - 1
@@ -166,8 +180,8 @@ func rewriteWorkflow(src string) (string, int, error) {
 			for end > st.Line && (strings.TrimSpace(lines[end-1]) == "" || strings.HasPrefix(strings.TrimSpace(lines[end-1]), "#")) {
 				end--
 			}
-			bs = append(bs, blk{st.Line - 1, end, st})
-			if isGoTestFuzz(st) {
+			bs = append(bs, blk{start, end, st})
+			if isGoTestFuzz(st) || isTolerantFuzzrun(st) {
 				anyFuzz = true
 			}
 		}
@@ -178,7 +192,7 @@ func rewriteWorkflow(src string) (string, int, error) {
 		inserted := false
 		for _, b := range bs {
 			switch {
-			case isGoTestFuzz(b.node):
+			case isGoTestFuzz(b.node) || isTolerantFuzzrun(b.node):
 				replaced++
 				txt := ""
 				if !inserted {
@@ -187,12 +201,25 @@ func rewriteWorkflow(src string) (string, int, error) {
 				edits[b.start] = edit{b.end, txt}
 			case !haveLogs && stepField(b.node, "name") == "upload any fuzz-discovered corpus":
 				block := strings.Join(lines[b.start:b.end], "")
+				crasher := strings.NewReplacer(
+					"upload any fuzz-discovered corpus", "upload the crasher",
+					"if: always()", "if: failure()",
+					"fuzz-findings", "fuzz-crashers",
+				).Replace(block)
 				logs := strings.NewReplacer(
 					"upload any fuzz-discovered corpus", "upload the per-target logs",
 					"fuzz-findings", "fuzz-logs",
 					"testdata/fuzz/", "fuzz-logs/",
 				).Replace(block)
-				edits[b.start] = edit{b.end, block + logs}
+				edits[b.start] = edit{b.end, crasher + logs}
+			case haveLogs && stepField(b.node, "name") == "upload any fuzz-discovered corpus":
+				block := strings.Join(lines[b.start:b.end], "")
+				crasher := strings.NewReplacer(
+					"upload any fuzz-discovered corpus", "upload the crasher",
+					"if: always()", "if: failure()",
+					"fuzz-findings", "fuzz-crashers",
+				).Replace(block)
+				edits[b.start] = edit{b.end, crasher}
 			}
 		}
 		for i := bs[0].start; i < jobEnd; i++ {
@@ -214,7 +241,10 @@ func rewriteWorkflow(src string) (string, int, error) {
 		sb.WriteString(lines[i])
 		i++
 	}
-	return strings.Replace(sb.String(), oldComment, newComment, 1), replaced, nil
+	res := sb.String()
+	res = strings.Replace(res, oldComment, newComment, 1)
+	res = strings.Replace(res, tolerantComment, redComment, 1)
+	return res, replaced, nil
 }
 
 func workflowCmd() *cobra.Command {
@@ -224,9 +254,9 @@ func workflowCmd() *cobra.Command {
 		Use:   "workflow",
 		Short: "Rewrite the nightly fuzz workflow to run fuzzrun (or create it)",
 		Long: `Rewrites .github/workflows/fuzz.yml so that every job fuzzing with one
-"go test -fuzz" step per target runs "fuzzrun run" instead, the form of
-go-simd/floats#66: the targets are found by parsing, exit 2 is red, exit 1 is
-tolerated, and the per-target logs are uploaded. Jobs are found by parsing the
+"go test -fuzz" step per target runs "fuzzrun run" instead: the targets are found
+by parsing, any crasher fails the step (non-zero exit), the crasher is uploaded
+on failure, and the per-target logs are uploaded. Jobs are found by parsing the
 YAML under the top-level jobs key; "gotip test" steps are left alone. When
 there is no fuzz.yml, a nightly one is created.
 
